@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Hollow-Like (inspired) — Single-file Demo</title>
+  <style>
+    :root{ --bg:#0b1020; --fg:#cfe8ff; }
+    html,body{height:100%;margin:0;background:linear-gradient(#071023,#0b1020);font-family:Inter,system-ui,Arial}
+    #gameWrap{display:flex;align-items:center;justify-content:center;height:100vh}
+    canvas{background:linear-gradient(#071023,#0b1020);box-shadow:0 8px 40px rgba(0,0,0,0.6);border-radius:8px}
+    #ui{position:fixed;left:18px;top:18px;color:var(--fg);font-weight:600}
+    #instructions{position:fixed;right:18px;top:18px;color:#bfcbdc;font-size:13px;text-align:right}
+    .hp{display:inline-block;margin-right:8px}
+    button{margin-top:8px;padding:6px 10px;border-radius:6px;border:1px solid rgba(255,255,255,0.06);background:rgba(255,255,255,0.02);color:var(--fg)}
+    footer{position:fixed;left:0;bottom:8px;right:0;text-align:center;color:#6f7f99;font-size:12px}
+  </style>
+</head>
+<body>
+  <div id="gameWrap">
+    <canvas id="game" width="960" height="540"></canvas>
+  </div>
+  <div id="ui"><span class="hp">❤❤❤</span><div id="msg"></div></div>
+  <div id="instructions">
+    <div>Arrows / WASD: Move • X: Jump • Z: Dash • C: Attack</div>
+    <div style="margin-top:6px">This demo is *inspired* by Hollow Knight — original assets only.</div>
+  </div>
+  <footer>Single-file demo • Replace shapes with your own sprites to continue development</footer>
+
+<script>
+/*
+  Hollow-Like single-file demo
+  - Simple platforming physics
+  - Melee attack, dash, double-jump
+  - Enemies with basic AI
+  - Tilemap level
+  - Camera follow
+  NOTE: All art here is procedural (shapes). Replace with images/sprites.
+*/
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+let keys = {};
+addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+// Utility
+const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+
+// Level tiles (0 empty, 1 ground)
+const tileSize = 48;
+const levelCols = 80, levelRows = 20;
+let level = [];
+function generateLevel(){
+  level = new Array(levelRows).fill(0).map(()=>new Array(levelCols).fill(0));
+  // ground at bottom
+  for(let c=0;c<levelCols;c++){
+    for(let r=levelRows-4;r<levelRows;r++) level[r][c]=1;
+  }
+  // random platforms
+  for(let i=0;i<120;i++){
+    const w = Math.floor(Math.random()*6)+2;
+    const c = Math.floor(Math.random()*(levelCols-6));
+    const r = Math.floor(Math.random()*(levelRows-7))+3;
+    for(let j=0;j<w;j++) level[r][c+j]=1;
+  }
+  // create a pit
+  for(let c=20;c<30;c++) for(let r=levelRows-4;r<levelRows;r++) level[r][c]=0;
+}
+
+generateLevel();
+
+// Camera
+let camX = 0, camY = 0;
+function updateCamera(){
+  camX = player.x - W/2 + player.w/2;
+  camY = player.y - H/2 + player.h/2;
+  camX = clamp(camX, 0, levelCols*tileSize - W);
+  camY = clamp(camY, 0, levelRows*tileSize - H);
+}
+
+// Entities
+function rectsOverlap(a,b){return !(a.x+bufferX > b.x+b.w-bufferX || a.x+a.w-bufferX < b.x+bufferX || a.y+a.h-bufferY > b.y+b.h-bufferY || a.y+bufferY < b.y+bufferY)}
+const bufferX = 0, bufferY = 0;
+
+class Entity{
+  constructor(x,y,w,h){this.x=x;this.y=y;this.w=w;this.h=h;this.vx=0;this.vy=0;this.onGround=false}
+  getAABB(){return {x:this.x,y:this.y,w:this.w,h:this.h}}
+}
+
+// player
+const player = new Entity(120, 100, 28, 36);
+player.speed = 220; player.jumpPower = 460; player.maxJumps=2; player.jumpsLeft=2; player.dashSpeed = 520; player.facing = 1; player.hp=3; player.maxHp=3;
+player.attackCooldown = 0; player.attackDuration = 0; player.dashCooldown=0; player.canDash=true;
+
+// enemies
+let enemies = [];
+class Enemy extends Entity{
+  constructor(x,y){super(x,y,32,32); this.speed=60; this.dir=1; this.hp=2}
+  update(dt){
+    this.vx = this.speed*this.dir;
+    this.vy += 1400*dt; // gravity
+    this.x += this.vx*dt; this.y += this.vy*dt;
+    // simple collision with tiles
+    collideEntityWithLevel(this);
+    // flip on platform edges or collide with wall
+    const footX = this.x + (this.dir>0? this.w+4 : -4);
+    const footY = this.y + this.h + 6;
+    const tx = Math.floor(footX / tileSize), ty = Math.floor(footY / tileSize);
+    if(tx<0 || tx>=levelCols || ty<0 || ty>=levelRows || level[ty] && level[ty][tx]===0) this.dir*=-1;
+  }
+}
+
+function spawnEnemies(){
+  enemies = [];
+  for(let i=0;i<10;i++){
+    const cx = Math.floor(Math.random()*(levelCols-6))*tileSize + 24;
+    const cy = Math.floor((levelRows-8))*tileSize - 40;
+    enemies.push(new Enemy(cx,cy));
+  }
+}
+spawnEnemies();
+
+// collisions with tilemap
+function tileAt(x,y){
+  const c = Math.floor(x / tileSize), r = Math.floor(y / tileSize);
+  if(c<0||c>=levelCols||r<0||r>=levelRows) return 0;
+  return level[r][c];
+}
+
+function collideEntityWithLevel(e){
+  // basic AABB tile collision
+  // move Y then X
+  // vertical
+  const oldY = e.y;
+  // check vertical collision is already applied outside when updating vy
+  if(e.vy>0){ // falling
+    const bottom = e.y + e.h;
+    const nextBottom = bottom;
+    const startCol = Math.floor(e.x / tileSize);
+    const endCol = Math.floor((e.x + e.w - 1) / tileSize);
+    const row = Math.floor(nextBottom / tileSize);
+    for(let c=startCol;c<=endCol;c++){
+      if(row>=0 && row<levelRows && c>=0 && c<levelCols && level[row][c]===1){
+        e.y = row*tileSize - e.h;
+        e.vy = 0; e.onGround=true; break;
+      } else e.onGround=false;
+    }
+  } else if(e.vy<0){
+    const top = e.y;
+    const row = Math.floor(top / tileSize);
+    const startCol = Math.floor(e.x / tileSize);
+    const endCol = Math.floor((e.x + e.w - 1)/tileSize);
+    for(let c=startCol;c<=endCol;c++){
+      if(row>=0 && row<levelRows && c>=0 && c<levelCols && level[row][c]===1){
+        e.y = (row+1)*tileSize; e.vy=0; break;
+      }
+    }
+  }
+  // horizontal
+  if(e.vx>0){
+    const right = e.x + e.w;
+    const col = Math.floor(right / tileSize);
+    const startRow = Math.floor(e.y / tileSize);
+    const endRow = Math.floor((e.y + e.h - 1) / tileSize);
+    for(let r=startRow;r<=endRow;r++){
+      if(col>=0 && col<levelCols && r>=0 && r<levelRows && level[r][col]===1){
+        e.x = col*tileSize - e.w; e.vx=0; break;
+      }
+    }
+  } else if(e.vx<0){
+    const left = e.x;
+    const col = Math.floor(left / tileSize);
+    const startRow = Math.floor(e.y / tileSize);
+    const endRow = Math.floor((e.y + e.h - 1) / tileSize);
+    for(let r=startRow;r<=endRow;r++){
+      if(col>=0 && col<levelCols && r>=0 && r<levelRows && level[r][col]===1){
+        e.x = (col+1)*tileSize; e.vx=0; break;
+      }
+    }
+  }
+}
+
+// game update
+let last = performance.now();
+const dtCap = 1/30;
+let paused=false;
+function gameLoop(t){
+  const rawDt = Math.min(dtCap, (t-last)/1000);
+  last = t;
+  if(!paused) update(rawDt);
+  render();
+  requestAnimationFrame(gameLoop);
+}
+requestAnimationFrame(gameLoop);
+
+function update(dt){
+  // input
+  const left = keys['arrowleft'] || keys['a'];
+  const right = keys['arrowright'] || keys['d'];
+  const jump = keys['x'];
+  const dash = keys['z'];
+  const attack = keys['c'];
+
+  // horizontal movement
+  let targetV = 0;
+  if(left) targetV = -player.speed;
+  if(right) targetV = player.speed;
+  player.facing = targetV===0? player.facing : (targetV>0?1:-1);
+  const accel = 2400;
+  player.vx += (targetV - player.vx) * clamp(accel*dt/Math.abs(targetV||1),0,1);
+
+  // gravity
+  player.vy += 1600*dt;
+
+  // jump
+  if(jump && !player._jumpHeld){
+    if(player.jumpsLeft>0){ player.vy = -player.jumpPower; player.jumpsLeft--; player._jumpHeld=true; }
+  }
+  if(!jump) player._jumpHeld=false;
+
+  // dash
+  if(dash && player.canDash && !player._dashHeld){
+    player._dashHeld=true; player.canDash=false; player.dashCooldown=0.9; player.vx = player.dashSpeed * player.facing; player.vy = 0; player._dashing=0.16; }
+  if(!dash) player._dashHeld=false;
+  if(player._dashing){ player._dashing -= dt; if(player._dashing<=0) player._dashing=0; }
+
+  // attack
+  if(attack && player.attackCooldown<=0 && !player._attackHeld){ player.attackDuration = 0.18; player.attackCooldown = 0.36; player._attackHeld=true; }
+  if(!attack) player._attackHeld=false;
+  player.attackCooldown = Math.max(0, player.attackCooldown - dt);
+  player.attackDuration = Math.max(0, player.attackDuration - dt);
+
+  // physics integration
+  player.x += player.vx*dt;
+  collideEntityWithLevel(player);
+  player.y += player.vy*dt;
+  collideEntityWithLevel(player);
+  if(player.onGround) player.jumpsLeft = player.maxJumps;
+
+  // dash cooldown
+  if(!player.canDash){ player.dashCooldown -= dt; if(player.dashCooldown<=0){ player.canDash=true; player.dashCooldown=0; } }
+
+  // simple enemy updates
+  for(let en of enemies) en.update(dt);
+
+  // attack collision
+  if(player.attackDuration>0){
+    const atk = {x: player.x + (player.facing>0? player.w: -20), y: player.y+6, w: 22, h: player.h-12};
+    for(let en of enemies){
+      if(aabbOverlap(atk,en)){
+        en.hp -= 1; en.vy = -220; if(en.hp<=0) en.dead=true;
+      }
+    }
+  }
+  enemies = enemies.filter(e=>!e.dead);
+
+  // enemy <-> player collision
+  for(let en of enemies){
+    if(aabbOverlap(player,en)){
+      // simple knockback and damage cooldown
+      if(!player._inv){ player.hp--; player._inv=1.2; player.vy=-260; player.vx = -player.facing*200; }
+    }
+  }
+  if(player._inv){ player._inv -= dt; if(player._inv<=0) player._inv=0; }
+
+  // respawn if fell
+  if(player.y > levelRows*tileSize + 200){ player.x=120; player.y=100; player.vx=0; player.vy=0; player.hp = Math.max(1, player.hp-1);} 
+
+  // UI message
+  if(player.hp<=0){ document.getElementById('msg').innerText = 'You Died — press R to restart'; paused=true; }
+
+  // restart
+  if(keys['r']){ reset(); }
+
+  updateCamera();
+}
+
+function reset(){
+  player.x=120; player.y=100; player.vx=0; player.vy=0; player.hp=player.maxHp; player.jumpsLeft=player.maxJumps; player.attackCooldown=0; player._inv=0; paused=false; generateLevel(); spawnEnemies(); document.getElementById('msg').innerText=''; }
+
+function aabbOverlap(a,b){ return !(a.x + a.w < b.x || a.x > b.x + b.w || a.y + a.h < b.y || a.y > b.y + b.h); }
+
+// rendering
+function render(){
+  // clear
+  ctx.clearRect(0,0,W,H);
+
+  // background parallax
+  drawBackground();
+
+  // tiles
+  const startCol = Math.floor(camX / tileSize);
+  const endCol = Math.floor((camX + W) / tileSize);
+  const startRow = Math.floor(camY / tileSize);
+  const endRow = Math.floor((camY + H) / tileSize);
+  for(let r=startRow;r<=endRow;r++){
+    for(let c=startCol;c<=endCol;c++){
+      const t = (r>=0 && r<levelRows && c>=0 && c<levelCols) ? level[r][c] : 0;
+      if(t===1){
+        const sx = c*tileSize - camX, sy = r*tileSize - camY;
+        // tile shadow
+        ctx.fillStyle = '#00101a';
+        ctx.fillRect(sx, sy, tileSize, tileSize);
+        // tile top
+        ctx.fillStyle = '#2b394a';
+        ctx.fillRect(sx+2, sy+2, tileSize-4, tileSize-8);
+        // subtle highlight
+        ctx.fillStyle = 'rgba(255,255,255,0.02)'; ctx.fillRect(sx+4, sy+4, tileSize-8, 6);
+      }
+    }
+  }
+
+  // enemies
+  for(let en of enemies){ drawEntity(en, '#e27a7a'); }
+
+  // player
+  drawPlayer(player);
+
+  // HUD
+  drawHUD();
+}
+
+function drawBackground(){
+  // far mountains
+  ctx.save();
+  ctx.translate(-camX*0.1, -camY*0.05);
+  const grad = ctx.createLinearGradient(0,0,0,H);
+  grad.addColorStop(0,'rgba(17,24,40,0.5)'); grad.addColorStop(1,'rgba(6,10,18,0.2)');
+  ctx.fillStyle = grad; ctx.fillRect(0,0,W, H);
+  // layered blobs
+  for(let i=0;i<6;i++){
+    const x = (i*330)%2000 + 200; const y = 120 + Math.sin(i*2+performance.now()/5000)*40;
+    ctx.beginPath(); ctx.ellipse(x - camX*0.08, y - camY*0.02, 420,120, 0, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(20,40,60,0.18)'; ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawEntity(e, color='#ffcc66'){
+  const sx = e.x - camX, sy = e.y - camY;
+  ctx.fillStyle = color; ctx.fillRect(sx,sy,e.w,e.h);
+  ctx.strokeStyle = 'rgba(0,0,0,0.2)'; ctx.strokeRect(sx,sy,e.w,e.h);
+}
+
+function drawPlayer(p){
+  const sx = p.x - camX, sy = p.y - camY;
+  // body
+  ctx.save();
+  ctx.translate(sx + p.w/2, sy + p.h/2);
+  if(p._inv) ctx.globalAlpha = 0.5 + 0.5*Math.sin(performance.now()/70);
+  ctx.fillStyle = '#cfe8ff';
+  ctx.beginPath(); ctx.ellipse(0,0,p.w*0.6,p.h*0.6,0,0,Math.PI*2); ctx.fill();
+  // mask/horn suggestive
+  ctx.fillStyle = '#0b1020'; ctx.beginPath(); ctx.moveTo(0,-p.h*0.5); ctx.lineTo(p.facing*10, -p.h*0.75); ctx.lineTo(0,-p.h*0.6); ctx.fill();
+  ctx.restore();
+
+  // attack arc
+  if(p.attackDuration>0){
+    ctx.save(); ctx.globalAlpha = 0.8; ctx.translate(sx + p.w/2, sy + p.h/2);
+    ctx.beginPath(); ctx.moveTo(0,0); ctx.arc(p.facing*10, 0, 48, p.facing>0? -1.2 : -1.95, p.facing>0? 1.2 : 1.95); ctx.fillStyle='rgba(255,255,255,0.06)'; ctx.fill(); ctx.restore();
+  }
+}
+
+function drawHUD(){
+  const hpEl = document.querySelector('.hp');
+  hpEl.innerHTML = ' '.repeat(0);
+  let s='';
+  for(let i=0;i<player.maxHp;i++) s += i<player.hp ? '❤' : '♡';
+  hpEl.textContent = s;
+}
+
+// simple mouse debug to place yourself
+canvas.addEventListener('dblclick', e=>{
+  const rx = e.clientX - canvas.getBoundingClientRect().left; const ry = e.clientY - canvas.getBoundingClientRect().top;
+  player.x = rx + camX - player.w/2; player.y = ry + camY - player.h/2; player.vx=0; player.vy=0;
+});
+
+// small polish: hero can wall-jump / slide (not implemented fully) TODO
+
+</script>
+</body>
+</html>
